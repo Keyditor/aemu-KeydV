@@ -141,11 +141,12 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 	// WLAN Switch Check
 	if(sceWlanGetSwitchState() == 1)
 	{
-		// Initialize Access Point Control
-		if(sceNetApctlInit(0x1800, 0x30) == 0)
+		int apctl_state = 0;
+		int apctl_already_connected = sceNetApctlGetState(&apctl_state) == 0 && apctl_state == PSP_NET_APCTL_STATE_GOT_IP;
+		if(apctl_already_connected || sceNetApctlInit(0x1800, 0x30) == 0)
 		{
 			// Attempt Counter
-			int attemptmax = 10;
+			int attemptmax = apctl_already_connected ? 1 : 10;
 			
 			// Attempt Number
 			int attempt = 0;
@@ -154,11 +155,11 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 			for(; attempt < attemptmax; attempt++)
 			{
 				// Start Connection
-				if(sceNetApctlConnect(_hotspot) == 0)
+				if(apctl_already_connected || sceNetApctlConnect(_hotspot) == 0)
 				{
 					// Wait for Connection
 					int statebefore = 0;
-					int state = 0; while(state != 4)
+					int state = apctl_already_connected ? PSP_NET_APCTL_STATE_GOT_IP : 0; while(state != PSP_NET_APCTL_STATE_GOT_IP)
 					{
 						// Query State
 						int getstate = sceNetApctlGetState(&state);
@@ -167,7 +168,7 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 						if(statebefore != state) printk("New Connection State: %d\n", state);					
 						
 						// Query Success
-						if(getstate == 0 && state != 4)
+						if(getstate == 0 && state != PSP_NET_APCTL_STATE_GOT_IP)
 						{
 							// Wait for Retry
 							sceKernelDelayThread(1000000);
@@ -181,7 +182,7 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 					}
 					
 					// Connected
-					if(state == 4)
+					if(state == PSP_NET_APCTL_STATE_GOT_IP)
 					{
 						// Create Friend Finder Socket
 						int socket = sceNetInetSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -295,14 +296,12 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 							sceNetInetClose(socket);
 						}
 						
-						// Close Hotspot Connection
-						sceNetApctlDisconnect();
+						if(!apctl_already_connected) sceNetApctlDisconnect();
 					}
 				}
 			}
 			
-			// Terminate Access Point Control
-			sceNetApctlTerm();	
+			if(!apctl_already_connected) sceNetApctlTerm();
 		}
 	}
 	
@@ -316,6 +315,27 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
  */
 int _readHotspotConfig(void)
 {
+	union SceNetApctlInfo active_ssid;
+	union SceNetApctlInfo active_ssid_length;
+	char active_ssid_text[33];
+	int active_state = 0;
+	memset(&active_ssid, 0, sizeof(active_ssid));
+	memset(&active_ssid_length, 0, sizeof(active_ssid_length));
+	if(sceNetApctlGetState(&active_state) == 0 && active_state == PSP_NET_APCTL_STATE_GOT_IP &&
+		sceNetApctlGetInfo(PSP_NET_APCTL_INFO_SSID, &active_ssid) == 0 &&
+		sceNetApctlGetInfo(PSP_NET_APCTL_INFO_SSID_LENGTH, &active_ssid_length) == 0 &&
+		active_ssid_length.ssidLength > 0 && active_ssid_length.ssidLength <= sizeof(active_ssid.ssid))
+	{
+		memcpy(active_ssid_text, active_ssid.ssid, active_ssid_length.ssidLength);
+		active_ssid_text[active_ssid_length.ssidLength] = 0;
+		_hotspot = _findHotspotConfigId(active_ssid_text);
+		if(_hotspot >= 0)
+		{
+			printk("Selected Netconf Access Point: %s\n", active_ssid_text);
+			return 0;
+		}
+	}
+
 	// Open Configuration File
 	int fd = sceIoOpen("ms0:/seplugins/hotspot.txt", PSP_O_RDONLY, 0777);
 	
@@ -387,25 +407,29 @@ const char * _readServerConfig(void)
 {
 	// Line Buffer
 	static char line[128];
+	static const char * config_paths[] = {
+		"ms0:/seplugins/atpro_last_ip.txt",
+		"ms0:/seplugins/server.txt"
+	};
+	int path_index = 0;
+	int path_count = sizeof(config_paths) / sizeof(config_paths[0]);
 
-	// Open Configuration File
-	int fd = sceIoOpen("ms0:/seplugins/server.txt", PSP_O_RDONLY, 0777);
-	
-	// Opened Configuration File
-	if(fd >= 0)
+	for(; path_index < path_count; path_index++)
 	{
-		// Read Line
-		_readLine(fd, line, sizeof(line));
-		
-		// Close Configuration File
-		sceIoClose(fd);
-		
-		// Return IP (String)
-		return line;
+		int fd = sceIoOpen(config_paths[path_index], PSP_O_RDONLY, 0777);
+		if(fd >= 0)
+		{
+			if(_readLine(fd, line, sizeof(line)) > 0)
+			{
+				sceIoClose(fd);
+				return line;
+			}
+			sceIoClose(fd);
+		}
 	}
-	
-	// Generic Error
-	return NULL;
+
+	strcpy(line, "coldbird.uk.to");
+	return line;
 }
 
 /**
@@ -555,7 +579,7 @@ int _friendFinder(SceSize args, void * argp)
 					SceNetAdhocctlChatPacketS2C * packet = (SceNetAdhocctlChatPacketS2C *)rx;
 					
 					// Fix for Idiots that try to troll the "ME" Nametag
-					if(stricmp((char *)packet->name.data, "ME") == 0) strcpy((char *)packet->name.data, "NOT ME");
+					if(strcasecmp((char *)packet->name.data, "ME") == 0) strcpy((char *)packet->name.data, "NOT ME");
 					
 					// Add Incoming Chat to HUD
 					addChatLog((char *)packet->name.data, packet->base.message);

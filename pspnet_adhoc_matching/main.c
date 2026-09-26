@@ -19,6 +19,12 @@
 #include <pspkernel.h>
 #include "library/common.h"
 
+void __attribute__((noreturn)) _exit(int status)
+{
+	sceKernelExitDeleteThread(status);
+	for(;;) sceKernelDelayThread(1000000);
+}
+
 #define MODULENAME "sceNetAdhocMatching_Library"
 PSP_MODULE_INFO(MODULENAME, PSP_MODULE_USER + 6, 1, 6);
 PSP_HEAP_SIZE_KB(HEAP_SIZE);

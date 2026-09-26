@@ -30,6 +30,7 @@
 #include "libs.h"
 #include "hud.h"
 #include "logs.h"
+#include "config.h"
 #include "systemctrl.h"
 
 PSP_MODULE_INFO("ATPRO", PSP_MODULE_KERNEL, 1, 0);
@@ -57,6 +58,11 @@ int framecount = 0;
 
 // Online Mode Switch
 int onlinemode = 0;
+
+static volatile int configuration_thread_running = 0;
+static int configuration_pending = 0;
+static int previous_wlan_switch = 0;
+static int power_lock_active = 0;
 
 // sceKernelLoadModule Stub for 1.X FW
 void * loadmodulestub = NULL;
@@ -313,7 +319,7 @@ int setframebuf(void *topaddr, int bufferwidth, int pixelformat, int sync)
 	framecount++;
 	
 	// Ready to Paint State
-	if(wait == 0)
+	if(wait == 0 && !atpro_config_dialog_active())
 	{
 		// Lock State
 		wait = 1;
@@ -347,7 +353,7 @@ int read_buffer_positive(SceCtrlData * pad_data, int count)
 	int result = sceCtrlReadBufferPositive(pad_data, count);
 	
 	// PRO HUD on screen
-	if(hud_on)
+	if(hud_on && !atpro_config_dialog_active())
 	{
 		// Iterate Elements
 		int i = 0; for(; i < count; i++)
@@ -368,7 +374,7 @@ int peek_buffer_positive(SceCtrlData * pad_data, int count)
 	int result = sceCtrlPeekBufferPositive(pad_data, count);
 	
 	// PRO HUD on screen
-	if(hud_on)
+	if(hud_on && !atpro_config_dialog_active())
 	{
 		// Iterate Elements
 		int i = 0; for(; i < count; i++)
@@ -390,7 +396,7 @@ int read_buffer_negative(SceCtrlData * pad_data, int count)
 	int result = sceCtrlReadBufferNegative(pad_data, count);
 	
 	// PRO HUD on screen
-	if(hud_on)
+	if(hud_on && !atpro_config_dialog_active())
 	{
 		// Iterate Elements
 		int i = 0; for(; i < count; i++)
@@ -412,7 +418,7 @@ int peek_buffer_negative(SceCtrlData * pad_data, int count)
 	int result = sceCtrlPeekBufferNegative(pad_data, count);
 	
 	// PRO HUD on screen
-	if(hud_on)
+	if(hud_on && !atpro_config_dialog_active())
 	{
 		// Iterate Elements
 		int i = 0; for(; i < count; i++)
@@ -702,6 +708,30 @@ int online_patcher(SceModule2 * module)
 	return sysctrl_patcher(module);
 }
 
+static int configuration_thread(SceSize args, void * argp)
+{
+	int result = atpro_configure_network();
+	if(result < 0 && running == 1) printk("ATPRO: network setup failed (%08X)\n", result);
+	configuration_thread_running = 0;
+	sceKernelExitDeleteThread(0);
+	return result;
+}
+
+static int start_configuration_thread(void)
+{
+	SceUID thread = sceKernelCreateThread("atpro_network_setup", configuration_thread, 0x18, 32768, 0, NULL);
+	int result = 0;
+	if(thread < 0) return thread;
+	configuration_thread_running = 1;
+	result = sceKernelStartThread(thread, 0, NULL);
+	if(result < 0)
+	{
+		configuration_thread_running = 0;
+		sceKernelDeleteThread(thread);
+	}
+	return result;
+}
+
 // Input Thread
 int input_thread(SceSize args, void * argp)
 {
@@ -723,6 +753,37 @@ int input_thread(SceSize args, void * argp)
 	// Endless Loop
 	while(running == 1)
 	{
+		int current_wlan_switch = sceWlanGetSwitchState();
+		if(current_wlan_switch != previous_wlan_switch)
+		{
+			previous_wlan_switch = current_wlan_switch;
+			onlinemode = current_wlan_switch;
+			if(current_wlan_switch)
+			{
+				configuration_pending = 1;
+				if(!power_lock_active)
+				{
+					scePowerLock(0);
+					power_lock_active = 1;
+				}
+			}
+			else
+			{
+				configuration_pending = 0;
+				atpro_config_cancel();
+				if(power_lock_active)
+				{
+					scePowerUnlock(0);
+					power_lock_active = 0;
+				}
+			}
+		}
+		if(configuration_pending && onlinemode && !configuration_thread_running)
+		{
+			configuration_pending = 0;
+			if(start_configuration_thread() < 0) printk("ATPRO: couldn't start network setup thread\n");
+		}
+
 		// Init Logic Timer
 		sceKernelGetSystemTime(&clock_start);
 		
@@ -790,7 +851,7 @@ int input_thread(SceSize args, void * argp)
 		}
 		
 		// No-Wait State
-		if(wait == 0)
+		if(wait == 0 && !atpro_config_dialog_active())
 		{
 			// Block Drawing Operation
 			wait = 1;
@@ -923,6 +984,7 @@ int module_start(SceSize args, void * argp)
 					{
 						// Disable Sleep Mode
 						scePowerLock(0);
+						power_lock_active = 1;
 						printk("Disabled Power Button!\n");
 					}
 					
@@ -954,10 +1016,12 @@ int module_start(SceSize args, void * argp)
 int module_stop(SceSize args, void * argp)
 {
 	// Shutdown GUI
+	atpro_config_cancel();
 	running = -1;
 	
 	// Wait for GUI Shutdown
-	while(running != 0) sceKernelDelayThread(10000);
+	while(running != 0 || configuration_thread_running) sceKernelDelayThread(10000);
+	if(power_lock_active) scePowerUnlock(0);
 	
 	// Return Success
 	return 0;

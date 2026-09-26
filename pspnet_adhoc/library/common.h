@@ -23,6 +23,9 @@
 // Basic Types
 #include <stdint.h>
 
+// PSP Kernel APIs
+#include <pspkernel.h>
+
 // Heap Control
 #include <malloc.h>
 

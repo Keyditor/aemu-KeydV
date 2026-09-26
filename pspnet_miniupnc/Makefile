@@ -18,7 +18,7 @@ library/upnpcommands.o \
 library/upnperrors.o \
 library/upnpreplyparse.o
 
-LIBS = 
+LIBS =
 
 OBJS = main.o ../memab/ATPRO.o $(LIBRARYOBJS)
 
@@ -51,7 +51,7 @@ PRX_EXPORTS = exports.exp
 
 USE_PSPSDK_LIBC = 1
 
-LDFLAGS = -mno-crt0 -nostartfiles
+LDFLAGS = -nostartfiles
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak

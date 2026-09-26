@@ -24,6 +24,12 @@
 #include "library/upnpcommands.h"
 #include "library/upnperrors.h"
 
+void __attribute__((noreturn)) _exit(int status)
+{
+	sceKernelExitDeleteThread(status);
+	for(;;) sceKernelDelayThread(1000000);
+}
+
 #define MODULENAME "sceNetMiniUPnP"
 PSP_MODULE_INFO(MODULENAME, PSP_MODULE_USER + 6, 1, 6);
 PSP_HEAP_SIZE_KB(100);

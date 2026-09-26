@@ -23,11 +23,17 @@
 // Basic Types
 #include <stdint.h>
 
+// PSP Kernel and File IO APIs
+#include <pspkernel.h>
+#include <pspiofilemgr.h>
+#include <pspiofilemgr_fcntl.h>
+
 // Heap Control
 #include <malloc.h>
 
 // String Handling
 #include <string.h>
+#include <strings.h>
 
 // Time Access
 #include <time.h>

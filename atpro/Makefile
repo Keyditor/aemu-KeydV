@@ -2,7 +2,7 @@ all:
 	mv atpro.prx ../dist/seplugins
 
 TARGET = atpro
-OBJS = main.o libs.o hud.o draw.o logs.o
+OBJS = main.o libs.o hud.o draw.o logs.o config.o
 
 CFLAGS = -Os -G0 -Wall -fno-pic
 
@@ -41,7 +41,7 @@ PRX_EXPORTS = exports.exp
 USE_KERNEL_LIBC = 1
 USE_KERNEL_LIBS = 1
 
-LDFLAGS = -mno-crt0 -nostartfiles
+LDFLAGS = -nostartfiles
 
 PSPSDK=$(shell psp-config --pspsdk-path)
 include $(PSPSDK)/lib/build.mak

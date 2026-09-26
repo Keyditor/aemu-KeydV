@@ -44,6 +44,7 @@
 #define MIN(x,y) (((x)<(y))?(x):(y))
 #endif
 
+#include <ctype.h>
 #include "common.h"
 #include "miniupnpcstrings.h"
 #include "miniwget.h"
