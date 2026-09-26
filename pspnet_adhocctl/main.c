@@ -350,6 +350,10 @@ int sceUtilityNetconfShutdownStartKernel(void)
 int module_start(SceSize args, void * argp)
 {
 	printk(MODULENAME " start!\n");
+	#ifdef ENABLE_NETLOCK
+	_networklock = sceKernelCreateSema("adhocctl_net_lock", 0, 1, 1, NULL);
+	if(_networklock < 0) return _networklock;
+	#endif
 	patch_netconf_utility(sceUtilityNetconfInitStartKernel, sceUtilityNetconfGetStatusKernel, sceUtilityNetconfUpdateKernel, sceUtilityNetconfShutdownStartKernel);
 	return 0;
 }
@@ -358,5 +362,13 @@ int module_start(SceSize args, void * argp)
 int module_stop(SceSize args, void * argp)
 {
 	printk(MODULENAME " stop!\n");
+	if(_init == 1) proNetAdhocctlTerm();
+	#ifdef ENABLE_NETLOCK
+	if(_networklock >= 0)
+	{
+		sceKernelDeleteSema(_networklock);
+		_networklock = -1;
+	}
+	#endif
 	return 0;
 }

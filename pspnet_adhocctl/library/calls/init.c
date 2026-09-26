@@ -48,6 +48,11 @@ int _hotspot = -1;
 // Meta Socket
 int _metasocket = -1;
 
+static char _active_server_host[128];
+static char _pending_server_host[128];
+volatile int _reconnect_thread_running = 0;
+int _apctl_owned = 0;
+
 #ifdef ENABLE_PEERLOCK
 // Peer Locker
 int _peerlock = 0;
@@ -55,7 +60,7 @@ int _peerlock = 0;
 
 #ifdef ENABLE_NETLOCK
 // Network Locker
-int _networklock = 0;
+int _networklock = -1;
 #endif
 
 // Bit-Values
@@ -64,6 +69,7 @@ int _zero = 0;
 
 // Function Prototypes
 int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip);
+int _reconnectServerThread(SceSize args, void * argp);
 int _readHotspotConfig(void);
 int _findHotspotConfigId(char * ssid);
 const char * _readServerConfig(void);
@@ -96,6 +102,9 @@ int proNetAdhocctlInit(int stacksize, int prio, const SceNetAdhocctlAdhocId * ad
 				// Read Server Configuration
 				if(ip != NULL)
 				{
+					strncpy(_active_server_host, ip, sizeof(_active_server_host) - 1);
+					_active_server_host[sizeof(_active_server_host) - 1] = 0;
+
 					// Initialize Networking
 					if(_initNetwork(adhoc_id, ip) == 0)
 					{
@@ -145,6 +154,7 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 		int apctl_already_connected = sceNetApctlGetState(&apctl_state) == 0 && apctl_state == PSP_NET_APCTL_STATE_GOT_IP;
 		if(apctl_already_connected || sceNetApctlInit(0x1800, 0x30) == 0)
 		{
+			if(!apctl_already_connected) _apctl_owned = 1;
 			// Attempt Counter
 			int attemptmax = apctl_already_connected ? 1 : 10;
 			
@@ -301,7 +311,11 @@ int _initNetwork(const SceNetAdhocctlAdhocId * adhoc_id, const char * server_ip)
 				}
 			}
 			
-			if(!apctl_already_connected) sceNetApctlTerm();
+			if(!apctl_already_connected)
+			{
+				sceNetApctlTerm();
+				_apctl_owned = 0;
+			}
 		}
 	}
 	
@@ -470,6 +484,86 @@ uint32_t _readLine(int fd, char * buffer, uint32_t buflen)
 	return strlen(buffer);
 }
 
+int _reconnectServerThread(SceSize args, void * argp)
+{
+	char target_host[sizeof(_pending_server_host)];
+	uint32_t server_ip = 0;
+	int resolver_started = 0;
+	int resolver_id = -1;
+	int socket = -1;
+	int old_socket = -1;
+	int published = 0;
+	unsigned char resolver_buffer[512];
+	SceNetAdhocctlLoginPacketC2S login_packet;
+
+	strncpy(target_host, _pending_server_host, sizeof(target_host) - 1);
+	target_host[sizeof(target_host) - 1] = 0;
+
+	if(sceNetResolverInit() == 0) resolver_started = 1;
+	if(resolver_started && sceNetResolverCreate(&resolver_id, resolver_buffer, sizeof(resolver_buffer)) == 0)
+	{
+		if(sceNetResolverStartNtoA(resolver_id, target_host, &server_ip, 500000, 2) != 0)
+			sceNetInetInetAton(target_host, &server_ip);
+		sceNetResolverDelete(resolver_id);
+	}
+	else sceNetInetInetAton(target_host, &server_ip);
+	if(resolver_started) sceNetResolverTerm();
+	if(server_ip == 0) goto reconnect_finished;
+
+	socket = sceNetInetSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(socket < 0) goto reconnect_finished;
+	sceNetInetSetsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &_one, sizeof(_one));
+	sceNetInetSetsockopt(socket, SOL_SOCKET, SO_REUSEPORT, &_one, sizeof(_one));
+
+	SceNetInetSockaddrIn addr;
+	addr.sin_len = sizeof(addr);
+	addr.sin_family = AF_INET;
+	addr.sin_addr = server_ip;
+	addr.sin_port = sceNetHtons(ADHOCCTL_METAPORT);
+	if(sceNetInetConnect(socket, (SceNetInetSockaddr *)&addr, sizeof(addr)) < 0) goto reconnect_finished;
+
+	memset(&login_packet, 0, sizeof(login_packet));
+	login_packet.base.opcode = OPCODE_LOGIN;
+	login_packet.mac = _parameter.bssid.mac_addr;
+	login_packet.name = _parameter.nickname;
+	memcpy(login_packet.game.data, _product_code.data, ADHOCCTL_ADHOCID_LEN);
+	if(sceNetInetSend(socket, &login_packet, sizeof(login_packet), INET_MSG_DONTWAIT) != sizeof(login_packet)) goto reconnect_finished;
+
+	_acquireNetworkLock();
+	if(_init == 1)
+	{
+		if(_thread_status == ADHOCCTL_STATE_CONNECTED || _thread_status == ADHOCCTL_STATE_GAMEMODE)
+		{
+			SceNetAdhocctlConnectPacketC2S connect_packet;
+			memset(&connect_packet, 0, sizeof(connect_packet));
+			connect_packet.base.opcode = OPCODE_CONNECT;
+			connect_packet.group = _parameter.group_name;
+			sceNetInetSend(socket, &connect_packet, sizeof(connect_packet), INET_MSG_DONTWAIT);
+		}
+		else if(_thread_status == ADHOCCTL_STATE_SCANNING)
+		{
+			uint8_t scan_opcode = OPCODE_SCAN;
+			sceNetInetSend(socket, &scan_opcode, sizeof(scan_opcode), INET_MSG_DONTWAIT);
+		}
+		old_socket = _metasocket;
+		_metasocket = socket;
+		strncpy(_active_server_host, target_host, sizeof(_active_server_host) - 1);
+		_active_server_host[sizeof(_active_server_host) - 1] = 0;
+		socket = -1;
+		published = 1;
+		if(old_socket >= 0) sceNetInetClose(old_socket);
+	}
+	_freeNetworkLock();
+
+	if(published) printk("Adhocctl: switched server to %s\n", target_host);
+
+reconnect_finished:
+	if(socket >= 0) sceNetInetClose(socket);
+	_reconnect_thread_running = 0;
+	sceKernelExitDeleteThread(0);
+	return 0;
+}
+
 /**
  * Friend Finder Thread (Receives Peer Information)
  * @param args Length of argp in Bytes (Unused)
@@ -491,10 +585,36 @@ int _friendFinder(SceSize args, void * argp)
 	
 	// Last Time Reception got updated
 	uint64_t lastreceptionupdate = 0;
+	uint64_t last_server_config_check = 0;
+	uint64_t last_reconnect_attempt = 0;
 	
 	// Finder Loop
 	while(_init == 1)
 	{
+		uint64_t now = sceKernelGetSystemTimeWide();
+		if(now - last_server_config_check >= 500000)
+		{
+			last_server_config_check = now;
+			if(!_reconnect_thread_running && now - last_reconnect_attempt >= 5000000)
+			{
+				const char * configured_host = _readServerConfig();
+				if(configured_host != NULL && strcmp(configured_host, _active_server_host) != 0)
+				{
+					SceUID reconnect_thread;
+					strncpy(_pending_server_host, configured_host, sizeof(_pending_server_host) - 1);
+					_pending_server_host[sizeof(_pending_server_host) - 1] = 0;
+					last_reconnect_attempt = now;
+					_reconnect_thread_running = 1;
+					reconnect_thread = sceKernelCreateThread("adhocctl_reconnect", _reconnectServerThread, 0x20, 16384, 0, NULL);
+					if(reconnect_thread < 0 || sceKernelStartThread(reconnect_thread, 0, NULL) < 0)
+					{
+						_reconnect_thread_running = 0;
+						if(reconnect_thread >= 0) sceKernelDeleteThread(reconnect_thread);
+					}
+				}
+			}
+		}
+
 		// Acquire Network Lock
 		_acquireNetworkLock();
 		
@@ -796,15 +916,7 @@ void _freePeerLock(void)
 void _acquireNetworkLock(void)
 {
 	#ifdef ENABLE_NETLOCK
-	// Wait for Unlock
-	while(_networklock)
-	{
-		// Delay Thread
-		sceKernelDelayThread(1);
-	}
-	
-	// Lock Access
-	_networklock = 1;
+	if(_networklock >= 0) sceKernelWaitSema(_networklock, 1, NULL);
 	#endif
 }
 
@@ -814,8 +926,7 @@ void _acquireNetworkLock(void)
 void _freeNetworkLock(void)
 {
 	#ifdef ENABLE_NETLOCK
-	// Unlock Access
-	_networklock = 0;
+	if(_networklock >= 0) sceKernelSignalSema(_networklock, 1);
 	#endif
 }
 

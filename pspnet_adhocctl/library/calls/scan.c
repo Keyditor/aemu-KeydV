@@ -36,7 +36,9 @@ int proNetAdhocctlScan(void)
 			uint8_t opcode = OPCODE_SCAN;
 			
 			// Send Scan Request Packet
-			sceNetInetSend(_metasocket, &opcode, 1, INET_MSG_DONTWAIT);
+			_acquireNetworkLock();
+			if(_metasocket >= 0) sceNetInetSend(_metasocket, &opcode, 1, INET_MSG_DONTWAIT);
+			_freeNetworkLock();
 			
 			// Return Success
 			return 0;

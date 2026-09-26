@@ -36,7 +36,7 @@ int proNetAdhocctlTerm(void)
 		setConnectionStatus(0);
 		
 		// Wait for internal thread cooldown
-		while(_init != -1) sceKernelDelayThread(10000);
+		while(_init != -1 || _reconnect_thread_running) sceKernelDelayThread(10000);
 		
 		// Multithreading Lock
 		_acquirePeerLock();
@@ -56,23 +56,26 @@ int proNetAdhocctlTerm(void)
 		// Delete Group Reference
 		_networks = NULL;
 		
-		// Delete Socket
-		sceNetInetClose(_metasocket);
-		
-		// Delete Socket Reference
+		_acquireNetworkLock();
+		if(_metasocket >= 0) sceNetInetClose(_metasocket);
 		_metasocket = -1;
+		_freeNetworkLock();
 		
 		// Stop UPNP Library
 		int status = 0; sceKernelStopModule(_upnp_uid, 0, NULL, &status, NULL);
 		
 		// Unload UPNP Library
 		sceKernelUnloadModule(_upnp_uid);
-		
-		// Close Hotspot Connection
-		sceNetApctlDisconnect();
-		
-		// Terminate Access Point Control
-		sceNetApctlTerm();
+
+		if(_apctl_owned)
+		{
+			// Close Hotspot Connection
+			sceNetApctlDisconnect();
+
+			// Terminate Access Point Control
+			sceNetApctlTerm();
+			_apctl_owned = 0;
+		}
 		
 		// Issue Library cooldown
 		_init = 0;

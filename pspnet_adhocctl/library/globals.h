@@ -66,6 +66,8 @@ extern int _hotspot;
 
 // Meta Socket
 extern int _metasocket;
+extern volatile int _reconnect_thread_running;
+extern int _apctl_owned;
 
 #ifdef ENABLE_PEERLOCK
 // Peer Locker

@@ -38,6 +38,7 @@ OBJS = main.o ../memab/ATPRO.o $(LIBRARYOBJS)
 
 #CFLAGS = -Os -G0 -Wall -fno-pic
 CFLAGS = -O0 -G0 -Wall -fno-pic
+ENABLE_NETLOCK ?= 1
 
 ifeq ($(CONFIG_620), 1)
 CFLAGS += -DCONFIG_620=1
